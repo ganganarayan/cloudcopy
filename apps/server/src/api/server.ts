@@ -1,12 +1,20 @@
 import Fastify, { type FastifyError } from 'fastify';
 import swagger from '@fastify/swagger';
 import swaggerUi from '@fastify/swagger-ui';
+import websocket from '@fastify/websocket';
 import type { AppConfig } from '../config.js';
 import type { Db } from '../db/client.js';
 import type { LogService } from '../services/log.service.js';
 import type { EventService } from '../services/event.service.js';
 import type { FlagsService } from '../services/flags.service.js';
+import type { ProviderAccountService } from '../services/provider-account.service.js';
 import type { Metrics } from '../observability/metrics.js';
+import type { TransferEngine } from '../engine/engine.js';
+import type { ProgressBus } from '../realtime/bus.js';
+import { registerAccountRoutes } from './routes/accounts.routes.js';
+import { registerBrowseRoutes } from './routes/browse.routes.js';
+import { registerJobRoutes } from './routes/jobs.routes.js';
+import { registerWsRoutes } from './routes/ws.routes.js';
 
 export interface AppContext {
   config: AppConfig;
@@ -15,6 +23,11 @@ export interface AppContext {
   events: EventService;
   flags: FlagsService;
   metrics: Metrics;
+  accounts: ProviderAccountService;
+  engine: TransferEngine;
+  bus: ProgressBus;
+  /** Single-user mode: every request acts as this user. */
+  defaultUserId: string;
 }
 
 declare module 'fastify' {
@@ -45,6 +58,17 @@ export async function buildServer(ctx: AppContext) {
     },
   });
   await app.register(swaggerUi, { routePrefix: '/api/docs' });
+  await app.register(websocket);
+
+  await app.register(
+    async (api) => {
+      registerAccountRoutes(api, ctx);
+      registerBrowseRoutes(api, ctx);
+      registerJobRoutes(api, ctx);
+      registerWsRoutes(api, ctx);
+    },
+    { prefix: '/api/v1' },
+  );
 
   app.get(
     '/healthz',
@@ -73,6 +97,25 @@ export async function buildServer(ctx: AppContext) {
     reply.header('content-type', ctx.metrics.registry.contentType);
     return ctx.metrics.registry.metrics();
   });
+
+  // Serve the built web app (SPA) when present. In dev the Vite server proxies
+  // /api instead, so a missing dist is fine.
+  const { existsSync } = await import('node:fs');
+  const { join, dirname } = await import('node:path');
+  const { fileURLToPath } = await import('node:url');
+  const here = dirname(fileURLToPath(import.meta.url));
+  const webDist = [join(process.cwd(), 'apps/web/dist'), join(here, '../../../web/dist')].find((p) => existsSync(p));
+  if (webDist) {
+    const staticPlugin = (await import('@fastify/static')).default;
+    await app.register(staticPlugin, { root: webDist, wildcard: false });
+    app.setNotFoundHandler((req, reply) => {
+      if (req.url.startsWith('/api') || req.url.startsWith('/metrics') || req.url.startsWith('/healthz')) {
+        return reply.status(404).send({ statusCode: 404, error: 'NotFound', message: 'route not found' });
+      }
+      return reply.sendFile('index.html');
+    });
+    ctx.log.info('api', 'serving web build', { webDist });
+  }
 
   app.setErrorHandler((err: FastifyError, req, reply) => {
     const statusCode = err.statusCode ?? 500;

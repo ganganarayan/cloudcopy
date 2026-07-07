@@ -12,7 +12,11 @@ import { seedProviders } from '../src/db/seed.js';
 import { LogService } from '../src/services/log.service.js';
 import { EventService } from '../src/services/event.service.js';
 import { FlagsService } from '../src/services/flags.service.js';
+import { ProviderAccountService } from '../src/services/provider-account.service.js';
+import { ensureDefaultUser } from '../src/services/bootstrap-user.js';
 import { createMetrics } from '../src/observability/metrics.js';
+import { ProgressBus } from '../src/realtime/bus.js';
+import { TransferEngine } from '../src/engine/engine.js';
 import { buildServer } from '../src/api/server.js';
 
 const PORT = 54329;
@@ -120,22 +124,31 @@ describe('http server', () => {
       LOG_LEVEL: 'silent',
     } as NodeJS.ProcessEnv);
     const log = new LogService(handle.db, { level: 'silent' });
+    const events = new EventService(handle.db);
+    const bus = new ProgressBus();
+    const metrics = createMetrics();
+    const engine = new TransferEngine(config, handle.db, log, events, bus, metrics);
+    const defaultUserId = await ensureDefaultUser(handle.db);
     const app = await buildServer({
       config,
       db: handle.db,
       log,
-      events: new EventService(handle.db),
+      events,
       flags: new FlagsService(handle.db),
-      metrics: createMetrics(),
+      metrics,
+      accounts: new ProviderAccountService(config, handle.db),
+      engine,
+      bus,
+      defaultUserId,
     });
 
     const health = await app.inject({ method: 'GET', url: '/healthz' });
     expect(health.statusCode).toBe(200);
     expect(health.json()).toMatchObject({ status: 'ok', version: '0.1.0' });
 
-    const metrics = await app.inject({ method: 'GET', url: '/metrics' });
-    expect(metrics.statusCode).toBe(200);
-    expect(metrics.body).toContain('cloudcopy_queue_depth');
+    const metricsRes = await app.inject({ method: 'GET', url: '/metrics' });
+    expect(metricsRes.statusCode).toBe(200);
+    expect(metricsRes.body).toContain('cloudcopy_queue_depth');
 
     const docs = await app.inject({ method: 'GET', url: '/api/docs' });
     expect([200, 302]).toContain(docs.statusCode);

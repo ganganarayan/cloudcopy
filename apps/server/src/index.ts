@@ -6,11 +6,15 @@ import { seedProviders } from './db/seed.js';
 import { LogService } from './services/log.service.js';
 import { EventService } from './services/event.service.js';
 import { FlagsService } from './services/flags.service.js';
+import { ProviderAccountService } from './services/provider-account.service.js';
+import { ensureDefaultUser } from './services/bootstrap-user.js';
 import { createMetrics } from './observability/metrics.js';
+import { ProviderRegistry } from './providers/registry.js';
+import { ProgressBus } from './realtime/bus.js';
+import { TransferEngine } from './engine/engine.js';
 import { buildServer } from './api/server.js';
 
-// Boot order (frozen design): config → migrate → seed → [recover: Phase 5] →
-// listen → [start workers: Phase 4B]. Graceful SIGTERM keeps checkpoints clean.
+// Boot order: config → migrate → seed → recover(engine.start) → listen → pump.
 const config = loadConfig();
 const { db, pool } = createDb(config.DATABASE_URL);
 const log = new LogService(db, { level: config.LOG_LEVEL });
@@ -30,8 +34,22 @@ try {
   const events = new EventService(db);
   const flags = new FlagsService(db);
   const metrics = createMetrics();
+  const bus = new ProgressBus();
+  const registry = new ProviderRegistry(config);
+  const accounts = new ProviderAccountService(config, db);
+  const engine = new TransferEngine(config, db, log, events, bus, metrics, registry);
 
-  const app = await buildServer({ config, db, log, events, flags, metrics });
+  const defaultUserId = await ensureDefaultUser(db);
+
+  // Mirror engine events into the notification stream for the bell.
+  events.onEvent((e) => {
+    if (EventService.isNotification(e.type as never)) {
+      bus.publish({ t: 'notification', eventId: String(e.id), type: e.type, payload: e.payload, createdAt: e.createdAt.toISOString() });
+    }
+  });
+
+  const app = await buildServer({ config, db, log, events, flags, metrics, accounts, engine, bus, defaultUserId });
+  await engine.start();
   await app.listen({ host: config.HOST, port: config.PORT });
   log.info('system', 'server listening', { host: config.HOST, port: config.PORT });
 
@@ -41,6 +59,7 @@ try {
     shuttingDown = true;
     log.info('system', 'shutting down', { signal });
     try {
+      await engine.stop();
       await app.close();
       await log.close();
       await pool.end();

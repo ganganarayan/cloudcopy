@@ -1,0 +1,14 @@
+[build]
+builder = "dockerfile"
+
+[deploy]
+healthcheckPath = "/healthz"
+healthcheckTimeout = 120
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 10
+
+# Provision a PostgreSQL plugin and Railway injects DATABASE_URL automatically.
+# Required env vars (set in the Railway dashboard):
+#   CREDENTIALS_KEY   — openssl rand -base64 32
+#   PUBLIC_URL        — https://<your-app>.up.railway.app
+#   GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET  (for Drive)

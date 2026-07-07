@@ -10,6 +10,10 @@ node_modules/
 dist/
 build/
 .next/
+*.tsbuildinfo
+
+# Local dev (embedded postgres + generated key)
+.dev/
 
 # Logs
 *.log
