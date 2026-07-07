@@ -75,7 +75,17 @@ export class MegaProvider implements CloudProvider {
   static async fromSession(sessionJson: string): Promise<MegaProvider> {
     const s = JSON.parse(sessionJson) as MegaSession;
     const storage = Storage.fromJSON({ ...s, options: { keepalive: false } as never });
-    await storage.ready;
+    // fromJSON restores the session (sid + key) but does NOT fetch the file tree,
+    // so storage.root/children are empty. Load the account tree explicitly.
+    await storage.ready.catch(() => undefined);
+    try {
+      await storage.reload(true);
+    } catch (err) {
+      throw toProviderError(err, 'session reload');
+    }
+    if (!storage.root) {
+      throw new ProviderError('auth_invalid', 'MEGA session could not load the account — reconnect the account');
+    }
     return new MegaProvider(storage);
   }
 
