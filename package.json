@@ -1,0 +1,26 @@
+{
+  "name": "cloudcopy",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Cloud Copy — cloud data movement platform",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w @cloudcopy/server",
+    "build": "npm run build -w @cloudcopy/server",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "vitest run",
+    "db:generate": "npm run db:generate -w @cloudcopy/server",
+    "db:migrate": "npm run db:migrate -w @cloudcopy/server"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.0"
+  }
+}
