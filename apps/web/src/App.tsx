@@ -1,13 +1,31 @@
 import { useCallback, useEffect, useState } from 'react';
-import { api, connectWs, defaultTransferOptions, formatBytes, type Account, type Job, type TransferOptions } from './api.js';
+import {
+  api,
+  connectWs,
+  defaultTransferOptions,
+  formatBytes,
+  type Account,
+  type Job,
+  type JobFile,
+  type TransferOptions,
+} from './api.js';
 import { FolderPane, type Selected } from './FolderPane.js';
 import { TransferOptionsPanel } from './TransferOptions.js';
 
 const ACTIVE = new Set(['queued', 'preparing', 'scanning', 'planning', 'running', 'retrying', 'paused']);
 
+export interface FileProgress {
+  committedOffset: number;
+  sizeBytes: number;
+  bps: number;
+  etaSec: number | null;
+}
+
 export function App() {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [jobs, setJobs] = useState<Job[]>([]);
+  const [fileProgress, setFileProgress] = useState<Map<string, FileProgress>>(new Map());
+  const [filesVersion, setFilesVersion] = useState(0);
   const [notifications, setNotifications] = useState<{ id: string; type: string; at: string }[]>([]);
   const [bellPulse, setBellPulse] = useState(false);
   const [showBell, setShowBell] = useState(false);
@@ -33,6 +51,19 @@ export function App() {
         setBellPulse(true);
         setTimeout(() => setBellPulse(false), 4000);
       }
+      if (t === 'file.progress') {
+        setFileProgress((m) => {
+          const next = new Map(m);
+          next.set(String(ev.fileId), {
+            committedOffset: Number(ev.committedOffset),
+            sizeBytes: Number(ev.sizeBytes),
+            bps: Number(ev.bps),
+            etaSec: ev.etaSec == null ? null : Number(ev.etaSec),
+          });
+          return next;
+        });
+      }
+      if (t === 'file.state') setFilesVersion((v) => v + 1);
       if (t === 'job.state' || t === 'file.state') refreshJobs();
     });
     return () => ws.close();
@@ -75,6 +106,12 @@ export function App() {
 
   const startTransfer = async () => {
     if (!source || !dest || selected.size === 0) return;
+    if (options.operation === 'move') {
+      const ok = window.confirm(
+        `MOVE will permanently DELETE the selected source file(s) from MEGA after each is transferred and verified.\n\nThis cannot be undone. Continue?`,
+      );
+      if (!ok) return;
+    }
     setBusy(true);
     try {
       await api.createJob({
@@ -203,16 +240,24 @@ export function App() {
           <div className="mt-4 flex items-center justify-between">
             <div className="text-sm text-slate-400">{selected.size} item(s) selected</div>
             <button
-              className="px-5 py-2 rounded-lg bg-sky-600 hover:bg-sky-500 disabled:opacity-40 disabled:cursor-not-allowed font-medium"
+              className={`px-5 py-2 rounded-lg disabled:opacity-40 disabled:cursor-not-allowed font-medium ${
+                options.operation === 'move' ? 'bg-orange-600 hover:bg-orange-500' : 'bg-sky-600 hover:bg-sky-500'
+              }`}
               disabled={!source || !dest || selected.size === 0 || busy}
               onClick={startTransfer}
             >
-              {busy ? 'Starting…' : `Transfer →`}
+              {busy ? 'Starting…' : options.operation === 'move' ? 'Move →' : 'Transfer →'}
             </button>
           </div>
         </section>
 
-        <Jobs jobs={jobs} onAction={(id, a) => api.jobAction(id, a).then(refreshJobs)} />
+        <Jobs
+          jobs={jobs}
+          fileProgress={fileProgress}
+          filesVersion={filesVersion}
+          onJobAction={(id, a) => api.jobAction(id, a).then(refreshJobs)}
+          onFileAction={(jobId, fileId, a) => api.fileAction(jobId, fileId, a).then(() => setFilesVersion((v) => v + 1))}
+        />
       </main>
 
       {toast && (
@@ -339,46 +384,163 @@ function AccountList({ accounts, onRemove }: { accounts: Account[]; onRemove: (i
   );
 }
 
-function Jobs({ jobs, onAction }: { jobs: Job[]; onAction: (id: string, a: 'pause' | 'resume' | 'cancel' | 'retry') => void }) {
+type JobActionFn = (id: string, a: 'pause' | 'resume' | 'cancel' | 'retry') => void;
+type FileActionFn = (jobId: string, fileId: string, a: 'pause' | 'resume' | 'cancel') => void;
+
+function Jobs({
+  jobs,
+  fileProgress,
+  filesVersion,
+  onJobAction,
+  onFileAction,
+}: {
+  jobs: Job[];
+  fileProgress: Map<string, FileProgress>;
+  filesVersion: number;
+  onJobAction: JobActionFn;
+  onFileAction: FileActionFn;
+}) {
   if (jobs.length === 0) return null;
   return (
     <section>
       <h2 className="text-sm font-semibold text-slate-400 uppercase mb-3">Jobs</h2>
       <div className="space-y-3">
-        {jobs.map((j) => {
-          const pct = j.totalBytes > 0 ? Math.min(100, Math.round((j.transferredBytes / j.totalBytes) * 100)) : 0;
-          return (
-            <div key={j.id} className="border border-slate-700 rounded-lg p-3 bg-slate-900/40">
-              <div className="flex items-center justify-between mb-2">
-                <div className="font-medium">{j.name}</div>
-                <div className="flex items-center gap-2">
-                  <StateBadge state={j.state} />
-                  {j.state === 'running' && <ActionBtn label="Pause" onClick={() => onAction(j.id, 'pause')} />}
-                  {j.state === 'paused' && <ActionBtn label="Resume" onClick={() => onAction(j.id, 'resume')} />}
-                  {(j.state === 'failed' || j.failedFiles > 0) && <ActionBtn label="Retry" onClick={() => onAction(j.id, 'retry')} />}
-                  {ACTIVE.has(j.state) && <ActionBtn label="Cancel" onClick={() => onAction(j.id, 'cancel')} />}
-                </div>
-              </div>
-              <div className="h-2 bg-slate-800 rounded overflow-hidden">
-                <div className="h-full bg-sky-500 transition-all" style={{ width: `${pct}%` }} />
-              </div>
-              <div className="flex justify-between text-xs text-slate-400 mt-1">
-                <span>
-                  {j.completedFiles}/{j.totalFiles} files
-                  {j.failedFiles > 0 && <span className="text-red-400"> · {j.failedFiles} failed</span>}
-                  {j.skippedFiles > 0 && <span className="text-amber-400"> · {j.skippedFiles} skipped</span>}
-                </span>
-                <span>
-                  {formatBytes(j.transferredBytes)} / {formatBytes(j.totalBytes)} ({pct}%)
-                </span>
-              </div>
-              {j.error && <div className="text-red-400 text-xs mt-1">{j.error}</div>}
-            </div>
-          );
-        })}
+        {jobs.map((j) => (
+          <JobRow
+            key={j.id}
+            job={j}
+            fileProgress={fileProgress}
+            filesVersion={filesVersion}
+            onJobAction={onJobAction}
+            onFileAction={onFileAction}
+          />
+        ))}
       </div>
     </section>
   );
+}
+
+function JobRow({
+  job: j,
+  fileProgress,
+  filesVersion,
+  onJobAction,
+  onFileAction,
+}: {
+  job: Job;
+  fileProgress: Map<string, FileProgress>;
+  filesVersion: number;
+  onJobAction: JobActionFn;
+  onFileAction: FileActionFn;
+}) {
+  const [open, setOpen] = useState(false);
+  const [files, setFiles] = useState<JobFile[]>([]);
+  const pct = j.totalBytes > 0 ? Math.min(100, Math.round((j.transferredBytes / j.totalBytes) * 100)) : 0;
+
+  const loadFiles = useCallback(() => api.jobFiles(j.id).then(setFiles).catch(() => {}), [j.id]);
+  useEffect(() => {
+    if (open) loadFiles();
+  }, [open, filesVersion, loadFiles]);
+
+  return (
+    <div className="border border-slate-700 rounded-lg p-3 bg-slate-900/40">
+      <div className="flex items-center justify-between mb-2">
+        <button className="font-medium flex items-center gap-2" onClick={() => setOpen((o) => !o)}>
+          <span className="text-slate-500">{open ? '▾' : '▸'}</span>
+          {j.name}
+        </button>
+        <div className="flex items-center gap-2">
+          <StateBadge state={j.state} />
+          {j.state === 'running' && <ActionBtn label="Pause all" onClick={() => onJobAction(j.id, 'pause')} />}
+          {j.state === 'paused' && <ActionBtn label="Resume" onClick={() => onJobAction(j.id, 'resume')} />}
+          {(j.state === 'failed' || j.failedFiles > 0) && <ActionBtn label="Retry" onClick={() => onJobAction(j.id, 'retry')} />}
+          {ACTIVE.has(j.state) && <ActionBtn label="Cancel" onClick={() => onJobAction(j.id, 'cancel')} />}
+        </div>
+      </div>
+      <div className="h-2 bg-slate-800 rounded overflow-hidden">
+        <div className="h-full bg-sky-500 transition-all" style={{ width: `${pct}%` }} />
+      </div>
+      <div className="flex justify-between text-xs text-slate-400 mt-1">
+        <span>
+          {j.completedFiles}/{j.totalFiles} files
+          {j.failedFiles > 0 && <span className="text-red-400"> · {j.failedFiles} failed</span>}
+          {j.skippedFiles > 0 && <span className="text-amber-400"> · {j.skippedFiles} skipped</span>}
+        </span>
+        <span>
+          {formatBytes(j.transferredBytes)} / {formatBytes(j.totalBytes)} ({pct}%)
+        </span>
+      </div>
+      {j.error && <div className="text-red-400 text-xs mt-1">{j.error}</div>}
+
+      {open && (
+        <div className="mt-3 border-t border-slate-800 pt-2 space-y-1">
+          {files.length === 0 && <div className="text-slate-600 text-xs">No files yet…</div>}
+          {files.map((f) => (
+            <FileRow key={f.id} jobId={j.id} file={f} progress={fileProgress.get(f.id)} onFileAction={onFileAction} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FileRow({
+  jobId,
+  file: f,
+  progress,
+  onFileAction,
+}: {
+  jobId: string;
+  file: JobFile;
+  progress?: FileProgress;
+  onFileAction: FileActionFn;
+}) {
+  const done = f.committedOffset || progress?.committedOffset || 0;
+  const size = f.size || progress?.sizeBytes || 0;
+  const live = f.state === 'downloading' || f.state === 'uploading';
+  const pct = size > 0 ? Math.min(100, Math.round(((live ? progress?.committedOffset ?? done : done) / size) * 100)) : f.state === 'completed' ? 100 : 0;
+  const name = f.path.split('/').pop();
+  const terminal = f.state === 'completed' || f.state === 'cancelled' || f.state === 'skipped';
+
+  return (
+    <div className="text-xs">
+      <div className="flex items-center gap-2">
+        <span className="flex-1 truncate" title={f.path}>
+          {name}
+        </span>
+        {f.paused && <span className="text-amber-400">paused</span>}
+        {f.state === 'completed' && <span className="text-emerald-400">✓{f.verified === false ? ' (size only)' : ''}</span>}
+        {f.state === 'failed' && <span className="text-red-400">failed</span>}
+        {f.state === 'skipped' && <span className="text-amber-400">skipped{f.error ? `: ${f.error}` : ''}</span>}
+        {live && progress && progress.bps > 0 && (
+          <span className="text-slate-500">
+            {formatBytes(progress.bps)}/s{progress.etaSec != null ? ` · ${fmtEta(progress.etaSec)}` : ''}
+          </span>
+        )}
+        {!terminal && (
+          <span className="flex gap-1">
+            {f.paused ? (
+              <MiniBtn label="Resume" onClick={() => onFileAction(jobId, f.id, 'resume')} />
+            ) : (
+              <MiniBtn label="Pause" onClick={() => onFileAction(jobId, f.id, 'pause')} />
+            )}
+            <MiniBtn label="Cancel" onClick={() => onFileAction(jobId, f.id, 'cancel')} />
+          </span>
+        )}
+      </div>
+      {!terminal && (
+        <div className="h-1 bg-slate-800 rounded overflow-hidden mt-0.5">
+          <div className={`h-full ${f.paused ? 'bg-amber-500' : 'bg-sky-500'} transition-all`} style={{ width: `${pct}%` }} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function fmtEta(sec: number): string {
+  if (sec < 60) return `${sec}s`;
+  if (sec < 3600) return `${Math.round(sec / 60)}m`;
+  return `${Math.round(sec / 3600)}h`;
 }
 
 function StateBadge({ state }: { state: string }) {
@@ -389,13 +551,23 @@ function StateBadge({ state }: { state: string }) {
         ? 'bg-red-900 text-red-300'
         : state === 'running'
           ? 'bg-sky-900 text-sky-300'
-          : 'bg-slate-700 text-slate-300';
+          : state === 'paused'
+            ? 'bg-amber-900 text-amber-300'
+            : 'bg-slate-700 text-slate-300';
   return <span className={`text-xs px-2 py-0.5 rounded ${color}`}>{state}</span>;
 }
 
 function ActionBtn({ label, onClick }: { label: string; onClick: () => void }) {
   return (
     <button className="text-xs px-2 py-0.5 rounded bg-slate-700 hover:bg-slate-600" onClick={onClick}>
+      {label}
+    </button>
+  );
+}
+
+function MiniBtn({ label, onClick }: { label: string; onClick: () => void }) {
+  return (
+    <button className="px-1.5 py-0.5 rounded bg-slate-700 hover:bg-slate-600 text-[11px]" onClick={onClick}>
       {label}
     </button>
   );

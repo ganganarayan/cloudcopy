@@ -8,6 +8,13 @@
       "when": 1783407364035,
       "tag": "0000_awesome_prowler",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1783472877174,
+      "tag": "0001_open_victor_mancha",
+      "breakpoints": true
     }
   ]
 }

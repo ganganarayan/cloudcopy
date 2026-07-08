@@ -59,6 +59,7 @@ export function registerJobRoutes(app: FastifyInstance, ctx: AppContext): void {
         id: f.id,
         path: f.sourcePath,
         state: f.state,
+        paused: f.paused,
         size: f.sizeBytes,
         committedOffset: f.committedOffset,
         attempt: f.attempt,
@@ -68,10 +69,21 @@ export function registerJobRoutes(app: FastifyInstance, ctx: AppContext): void {
     };
   });
 
+  // Job-level (global) controls.
   for (const action of ['pause', 'resume', 'cancel', 'retry'] as const) {
     app.post(`/jobs/:id/${action}`, async (req) => {
       const { id } = req.params as { id: string };
       await ctx.engine[action](id);
+      return { ok: true };
+    });
+  }
+
+  // Per-file (selective) controls.
+  const fileActions = { pause: 'pauseFile', resume: 'resumeFile', cancel: 'cancelFile' } as const;
+  for (const [action, method] of Object.entries(fileActions)) {
+    app.post(`/jobs/:id/files/:fileId/${action}`, async (req) => {
+      const { fileId } = req.params as { fileId: string };
+      await ctx.engine[method as (typeof fileActions)[keyof typeof fileActions]](fileId);
       return { ok: true };
     });
   }

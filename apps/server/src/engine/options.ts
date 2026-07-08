@@ -3,6 +3,9 @@ import { z } from 'zod';
 export const CONFLICT_POLICIES = ['skip', 'skip_if_same_size', 'overwrite', 'rename'] as const;
 export type ConflictPolicy = (typeof CONFLICT_POLICIES)[number];
 
+export const OPERATIONS = ['copy', 'move'] as const;
+export type Operation = (typeof OPERATIONS)[number];
+
 /** Per-job selective-transfer conditions (stored in jobs.options). */
 export const transferOptionsSchema = z
   .object({
@@ -18,6 +21,8 @@ export const transferOptionsSchema = z
     modifiedBefore: z.string().optional(),
     recurse: z.boolean().default(true),
     verify: z.boolean().default(true),
+    /** copy = leave source; move = delete source after a verified transfer. */
+    operation: z.enum(OPERATIONS).default('copy'),
   })
   .default({});
 

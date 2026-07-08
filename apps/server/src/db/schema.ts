@@ -260,6 +260,8 @@ export const jobFiles = pgTable(
       .references(() => jobs.id, { onDelete: 'cascade' }),
     planEntryId: bigint('plan_entry_id', { mode: 'number' }),
     state: fileStateEnum('state').notNull().default('pending'),
+    /** Per-file (selective) pause. A paused file is not claimed even when its job runs. */
+    paused: boolean('paused').notNull().default(false),
     sourceNodeId: text('source_node_id').notNull(),
     sourcePath: text('source_path').notNull(),
     destParentId: text('dest_parent_id'),

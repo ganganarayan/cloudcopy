@@ -31,9 +31,11 @@ export interface Job {
 }
 
 export type ConflictPolicy = 'skip' | 'skip_if_same_size' | 'overwrite' | 'rename';
+export type Operation = 'copy' | 'move';
 
 export interface TransferOptions {
   conflictPolicy: ConflictPolicy;
+  operation: Operation;
   includeExtensions: string[];
   excludeExtensions: string[];
   minSizeBytes?: number;
@@ -46,6 +48,7 @@ export interface TransferOptions {
 
 export const defaultTransferOptions: TransferOptions = {
   conflictPolicy: 'skip',
+  operation: 'copy',
   includeExtensions: [],
   excludeExtensions: [],
   skipEmpty: false,
@@ -53,6 +56,18 @@ export const defaultTransferOptions: TransferOptions = {
   nameExcludes: [],
   recurse: true,
 };
+
+export interface JobFile {
+  id: string;
+  path: string;
+  state: string;
+  paused: boolean;
+  size: number;
+  committedOffset: number;
+  attempt: number;
+  verified: boolean | null;
+  error: string | null;
+}
 
 async function json<T>(res: Response): Promise<T> {
   if (!res.ok) {
@@ -95,6 +110,10 @@ export const api = {
     }).then((r) => json<{ id: string }>(r)),
   jobAction: (id: string, action: 'pause' | 'resume' | 'cancel' | 'retry') =>
     fetch(`${base}/jobs/${id}/${action}`, { method: 'POST' }).then((r) => json(r)),
+  jobFiles: (id: string) =>
+    fetch(`${base}/jobs/${id}/files`).then((r) => json<{ files: JobFile[] }>(r)).then((d) => d.files),
+  fileAction: (jobId: string, fileId: string, action: 'pause' | 'resume' | 'cancel') =>
+    fetch(`${base}/jobs/${jobId}/files/${fileId}/${action}`, { method: 'POST' }).then((r) => json(r)),
 };
 
 export function formatBytes(n: number): string {

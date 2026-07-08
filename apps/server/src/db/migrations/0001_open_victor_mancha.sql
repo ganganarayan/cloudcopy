@@ -1,0 +1,1 @@
+ALTER TABLE "job_files" ADD COLUMN "paused" boolean DEFAULT false NOT NULL;

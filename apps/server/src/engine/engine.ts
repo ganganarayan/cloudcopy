@@ -14,7 +14,7 @@ import { ProviderRegistry, type AccountRow, type IProviderRegistry } from '../pr
 import type { ProgressBus } from '../realtime/bus.js';
 import { withRetry } from './retry.js';
 import { scanSelection, type ScannedFile, type SelectionEntry } from './scan.js';
-import { parseTransferOptions, type ConflictPolicy } from './options.js';
+import { parseTransferOptions, type ConflictPolicy, type TransferOptions } from './options.js';
 import { basename, filterReason, uniqueName } from './filter.js';
 
 const MAX_FILE_ATTEMPTS = 5;
@@ -62,7 +62,7 @@ export class TransferEngine {
   private readonly registry: IProviderRegistry;
   private running = false;
   private poll: NodeJS.Timeout | null = null;
-  private active = new Map<string, AbortController>();
+  private active = new Map<string, { ac: AbortController; jobId: string }>();
   private pausedJobs = new Set<string>();
 
   constructor(
@@ -95,7 +95,7 @@ export class TransferEngine {
   async stop(): Promise<void> {
     this.running = false;
     if (this.poll) clearInterval(this.poll);
-    for (const ac of this.active.values()) ac.abort();
+    for (const e of this.active.values()) e.ac.abort();
     // Give in-flight chunk writes a moment to checkpoint.
     await new Promise((r) => setTimeout(r, 500));
     await this.events.append('WorkerStopped', { workerId: this.workerId });
@@ -244,13 +244,16 @@ export class TransferEngine {
     }
   }
 
+  /** Global pause: stop the whole job and abort its in-flight files (checkpoints kept). */
   async pause(jobId: string): Promise<void> {
     this.pausedJobs.add(jobId);
     await this.setJobState(jobId, 'paused');
+    for (const [, e] of this.active) if (e.jobId === jobId) e.ac.abort();
     this.publishJobState(jobId, 'paused');
     await this.events.append('JobPaused', { jobId });
   }
 
+  /** Global resume: only files NOT individually paused become claimable again. */
   async resume(jobId: string): Promise<void> {
     this.pausedJobs.delete(jobId);
     await this.setJobState(jobId, 'running');
@@ -282,6 +285,45 @@ export class TransferEngine {
     void this.pump();
   }
 
+  // ── per-file (selective) controls ────────────────────────────────────────────
+
+  /** Selectively pause one file. It stays paused across a global resume until resumed. */
+  async pauseFile(fileId: string): Promise<void> {
+    await this.db.update(jobFiles).set({ paused: true, updatedAt: new Date() }).where(eq(jobFiles.id, fileId));
+    this.active.get(fileId)?.ac.abort(); // stop it now if mid-transfer; checkpoint is kept
+    const row = await this.fileRow(fileId);
+    if (row) this.bus.publish({ t: 'file.state', jobId: row.jobId, fileId, state: 'pending', attempt: 0 });
+  }
+
+  async resumeFile(fileId: string): Promise<void> {
+    await this.db.update(jobFiles).set({ paused: false, updatedAt: new Date() }).where(eq(jobFiles.id, fileId));
+    void this.pump();
+  }
+
+  async cancelFile(fileId: string): Promise<void> {
+    // Set terminal state first so the abort handler doesn't requeue it.
+    await this.db
+      .update(jobFiles)
+      .set({ state: 'cancelled', claimedBy: null, finishedAt: new Date(), updatedAt: new Date() })
+      .where(eq(jobFiles.id, fileId));
+    this.active.get(fileId)?.ac.abort();
+    const row = await this.fileRow(fileId);
+    if (row) {
+      this.bus.publish({ t: 'file.state', jobId: row.jobId, fileId, state: 'cancelled', attempt: 0 });
+      await this.maybeFinishJob(row.jobId, row.userId);
+    }
+  }
+
+  private async fileRow(fileId: string): Promise<{ jobId: string; userId: string } | null> {
+    const rows = await this.db
+      .select({ jobId: jobFiles.jobId, userId: jobs.userId })
+      .from(jobFiles)
+      .innerJoin(jobs, eq(jobs.id, jobFiles.jobId))
+      .where(eq(jobFiles.id, fileId))
+      .limit(1);
+    return rows[0] ?? null;
+  }
+
   // ── worker pump ──────────────────────────────────────────────────────────────
 
   private async pump(): Promise<void> {
@@ -290,7 +332,7 @@ export class TransferEngine {
       const file = await this.claimNextFile();
       if (!file) break;
       const ac = new AbortController();
-      this.active.set(file.id, ac);
+      this.active.set(file.id, { ac, jobId: file.jobId });
       void this.limit(() => this.transferFile(file, ac.signal))
         .catch((err) => this.log.error('engine', 'transferFile crashed', { err: (err as Error).message }, { jobFileId: file.id }))
         .finally(() => {
@@ -308,7 +350,7 @@ export class TransferEngine {
       WHERE id = (
         SELECT jf.id FROM job_files jf
         JOIN jobs j ON j.id = jf.job_id AND j.state = 'running'
-        WHERE jf.state = 'pending'
+        WHERE jf.state = 'pending' AND jf.paused = false
         ORDER BY j.created_at, jf.source_path
         FOR UPDATE SKIP LOCKED
         LIMIT 1
@@ -337,6 +379,7 @@ export class TransferEngine {
       await this.db.update(jobFiles).set({ state: 'pending', claimedBy: null }).where(eq(jobFiles.id, file.id));
       return;
     }
+    const opts = parseTransferOptions(job.options);
     await this.events.append('FileStarted', { fileId: file.id, path: file.sourcePath }, job.userId);
     try {
       const [source, dest] = await Promise.all([
@@ -344,9 +387,10 @@ export class TransferEngine {
         this.connectAccount(job.destAccountId),
       ]);
 
-      const { session, committedOffset, doneFile } = await this.ensureSession(file, dest, parseTransferOptions(job.options).conflictPolicy);
+      const { session, committedOffset, doneFile } = await this.ensureSession(file, dest, opts.conflictPolicy);
       if (doneFile) {
         await this.completeFile(file, job.userId, doneFile.id, doneFile.checksum?.value, true);
+        await this.maybeDeleteSource(opts, source, file, job.userId);
         return;
       }
 
@@ -410,8 +454,36 @@ export class TransferEngine {
       const localMd5 = md5?.digest('hex');
       const verified = localMd5 && destMd5 ? localMd5 === destMd5 : true; // size already enforced by Drive
       await this.completeFile(file, job.userId, destFileId, localMd5 ?? destMd5, verified);
+      await this.maybeDeleteSource(opts, source, file, job.userId);
     } catch (err) {
+      // Aborts (per-file/global pause or shutdown) requeue quietly with the checkpoint
+      // intact — they are not failures. Cancellation wins over requeue.
+      if (signal.aborted || this.pausedJobs.has(file.jobId)) {
+        const cur = await this.db.select({ state: jobFiles.state }).from(jobFiles).where(eq(jobFiles.id, file.id)).limit(1);
+        if (cur[0]?.state !== 'cancelled') {
+          await this.db.update(jobFiles).set({ state: 'pending', claimedBy: null, updatedAt: new Date() }).where(eq(jobFiles.id, file.id));
+        }
+        return;
+      }
       await this.handleFileError(file, job.userId, err);
+    }
+  }
+
+  /** For move jobs: delete the source file once the copy is verified. */
+  private async maybeDeleteSource(
+    opts: TransferOptions,
+    source: CloudProvider,
+    file: ClaimedFile,
+    userId: string,
+  ): Promise<void> {
+    if (opts.operation !== 'move') return;
+    try {
+      await source.delete(file.sourceNodeId);
+      this.log.info('engine', 'move: source deleted after transfer', { path: file.sourcePath }, { jobFileId: file.id });
+      await this.events.append('FileSkipped', { fileId: file.id, path: file.sourcePath, moved: true }, userId);
+    } catch (err) {
+      // The copy already succeeded; a failed source delete must not fail the file.
+      this.log.warn('engine', 'move: source delete failed (copy kept)', { err: (err as Error).message }, { jobFileId: file.id });
     }
   }
 

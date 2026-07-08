@@ -183,6 +183,35 @@ describe('transfer engine (fake providers)', () => {
     }
   });
 
+  it('move mode deletes the source after a verified transfer', async () => {
+    const source = new FakeSourceProvider();
+    const dest = new FakeDestProvider();
+    const size = 500_000;
+    source.addFile('m1', size, 44);
+    const engine = makeEngine(source, dest);
+    await engine.start();
+    try {
+      const jobId = await engine.createJob({
+        userId,
+        name: 'move',
+        sourceAccountId,
+        destAccountId,
+        sourceSelection: [{ nodeId: 'm1', path: 'm1.bin', isFolder: false }],
+        destFolderId: 'dest-root',
+        options: { operation: 'move' } as never,
+      });
+      await poll(() => jobState(jobId), (s) => s === 'completed' || s === 'failed');
+      expect(await jobState(jobId)).toBe('completed');
+      const upload = [...dest.uploads.values()][0]!;
+      expect(createHash('md5').update(upload.received).digest('hex')).toBe(
+        createHash('md5').update(genBytes(size, 44)).digest('hex'),
+      );
+      expect(source.deleted).toContain('m1'); // source removed after move
+    } finally {
+      await engine.stop();
+    }
+  });
+
   it('retries a transient 429 and still completes', async () => {
     const source = new FakeSourceProvider();
     const dest = new FakeDestProvider();

@@ -59,6 +59,29 @@ export function TransferOptionsPanel({
       {open && (
         <div className="px-3 pb-3 space-y-4 border-t border-slate-800 pt-3">
           <div>
+            <div className="text-xs uppercase text-slate-500 mb-1">Operation</div>
+            <div className="flex gap-2">
+              {(['copy', 'move'] as const).map((op) => (
+                <button
+                  key={op}
+                  onClick={() => set({ operation: op })}
+                  className={`px-3 py-1.5 rounded border capitalize ${
+                    value.operation === op ? 'bg-sky-600 border-sky-500' : 'bg-slate-800 border-slate-700'
+                  }`}
+                >
+                  {op}
+                </button>
+              ))}
+            </div>
+            {value.operation === 'move' && (
+              <div className="mt-2 text-xs text-red-300 bg-red-950/40 border border-red-900 rounded px-2 py-1.5">
+                ⚠ Move deletes each source file from MEGA <b>after</b> it is transferred and verified.
+                This is permanent. Requires delete permission on the source account.
+              </div>
+            )}
+          </div>
+
+          <div>
             <div className="text-xs uppercase text-slate-500 mb-1">If a file already exists</div>
             <select
               className="w-full bg-slate-800 border border-slate-700 rounded px-2 py-1.5"

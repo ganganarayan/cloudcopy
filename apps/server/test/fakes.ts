@@ -43,6 +43,7 @@ const NOOP_CAPS: ProviderCapabilities = {
 export class FakeSourceProvider implements CloudProvider {
   readonly id = 'mega';
   readonly capabilities = NOOP_CAPS;
+  readonly deleted: string[] = [];
   private files = new Map<string, { size: number; seed: number }>();
 
   addFile(id: string, size: number, seed = 7): void {
@@ -113,7 +114,9 @@ export class FakeSourceProvider implements CloudProvider {
   rename(): Promise<void> {
     return Promise.resolve();
   }
-  delete(): Promise<void> {
+  delete(id: string): Promise<void> {
+    this.deleted.push(id);
+    this.files.delete(id);
     return Promise.resolve();
   }
   createFolder(): Promise<CloudObject> {
