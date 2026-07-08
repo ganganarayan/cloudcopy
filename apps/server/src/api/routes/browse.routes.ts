@@ -36,6 +36,39 @@ export function registerBrowseRoutes(app: FastifyInstance, ctx: AppContext): voi
     }
   });
 
+  // Find folders anywhere in the account by name — reaches Drive "Computers"
+  // roots and other folders not under the browsable root.
+  app.get('/accounts/:id/search', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const { q } = req.query as { q?: string };
+    const account = await accountRow(id);
+    if (!account) return reply.status(404).send({ statusCode: 404, error: 'NotFound', message: 'account not found' });
+    if (!q || q.trim().length < 1) return { folders: [] };
+    try {
+      const provider = await ctx.engine.getRegistry().connect(account);
+      const folders = provider.searchFolders ? await provider.searchFolders(q.trim()) : [];
+      return { folders: folders.map((f) => ({ id: f.id, name: f.name, isFolder: true })) };
+    } catch (err) {
+      return reply.status(502).send({ statusCode: 502, error: 'ProviderError', message: (err as Error).message });
+    }
+  });
+
+  // Metadata for a single node — used to open a folder pasted as a link/ID.
+  app.get('/accounts/:id/meta', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const { fileId } = req.query as { fileId?: string };
+    const account = await accountRow(id);
+    if (!account) return reply.status(404).send({ statusCode: 404, error: 'NotFound', message: 'account not found' });
+    if (!fileId) return reply.status(400).send({ statusCode: 400, error: 'BadRequest', message: 'fileId required' });
+    try {
+      const provider = await ctx.engine.getRegistry().connect(account);
+      const m = await provider.getMetadata(fileId);
+      return { id: m.id, name: m.name, isFolder: m.isFolder };
+    } catch (err) {
+      return reply.status(404).send({ statusCode: 404, error: 'NotFound', message: (err as Error).message });
+    }
+  });
+
   app.get('/accounts/:id/quota', async (req, reply) => {
     const { id } = req.params as { id: string };
     const account = await accountRow(id);

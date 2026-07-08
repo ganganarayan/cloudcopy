@@ -67,6 +67,11 @@ export interface CloudProvider {
 
   listFolders(parentId: string | null): Promise<CloudObject[]>;
   listFiles(parentId: string | null): Promise<CloudObject[]>;
+  /**
+   * Find folders anywhere in the account by name substring. Lets the UI reach
+   * folders that aren't under the browsable root (e.g. Google Drive "Computers").
+   */
+  searchFolders?(query: string): Promise<CloudObject[]>;
   getMetadata(id: string): Promise<CloudObject>;
 
   /** Ranged decrypted/plain download stream. Range required when capabilities.rangeDownload. */

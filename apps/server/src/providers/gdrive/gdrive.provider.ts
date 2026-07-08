@@ -151,6 +151,24 @@ export class GDriveProvider implements CloudProvider {
     return mapFile((await res.json()) as Record<string, unknown>);
   }
 
+  /** Search folders across the whole account (My Drive AND Computers) by name. */
+  async searchFolders(query: string): Promise<CloudObject[]> {
+    const safe = query.replace(/['\\]/g, '\\$&');
+    const q = `mimeType = '${FOLDER_MIME}' and trashed = false and name contains '${safe}'`;
+    const params = new URLSearchParams({
+      q,
+      fields: `files(${FIELDS})`,
+      pageSize: '50',
+      corpora: 'user',
+      supportsAllDrives: 'true',
+      includeItemsFromAllDrives: 'true',
+    });
+    const res = await this.api(`/files?${params}`);
+    if (!res.ok) throw await driveError(res, 'search');
+    const data = (await res.json()) as { files?: Record<string, unknown>[] };
+    return (data.files ?? []).map(mapFile);
+  }
+
   downloadStream(_id: string, _range?: ByteRange): Promise<Readable> {
     // Drive is the destination in the MEGA→Drive flow; downloads not needed yet.
     throw new NotSupportedError('gdrive.downloadStream');

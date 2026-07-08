@@ -93,6 +93,14 @@ export const api = {
     fetch(`${base}/accounts/${accountId}/browse${parentId ? `?parentId=${encodeURIComponent(parentId)}` : ''}`).then((r) =>
       json<{ folders: Entry[]; files: Entry[] }>(r),
     ),
+  searchFolders: (accountId: string, q: string) =>
+    fetch(`${base}/accounts/${accountId}/search?q=${encodeURIComponent(q)}`)
+      .then((r) => json<{ folders: Entry[] }>(r))
+      .then((d) => d.folders),
+  getMeta: (accountId: string, fileId: string) =>
+    fetch(`${base}/accounts/${accountId}/meta?fileId=${encodeURIComponent(fileId)}`).then((r) =>
+      json<{ id: string; name: string; isFolder: boolean }>(r),
+    ),
   listJobs: () => fetch(`${base}/jobs`).then((r) => json<{ jobs: Job[] }>(r)).then((d) => d.jobs),
   createJob: (input: {
     name: string;

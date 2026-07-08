@@ -150,6 +150,15 @@ export class MegaProvider implements CloudProvider {
     return mapFile(node);
   }
 
+  async searchFolders(query: string): Promise<CloudObject[]> {
+    const q = query.toLowerCase();
+    const storage = this.ensure();
+    return Object.values(storage.files)
+      .filter((f) => f.directory && (f.name ?? '').toLowerCase().includes(q))
+      .slice(0, 50)
+      .map((f) => mapFile(f));
+  }
+
   async downloadStream(id: string, range?: ByteRange): Promise<Readable> {
     const node = this.ensure().files[id];
     if (!node) throw new ProviderError('not_found', `MEGA node ${id} not found`);
