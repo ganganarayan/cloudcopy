@@ -25,9 +25,34 @@ export interface Job {
   transferredBytes: number;
   completedFiles: number;
   failedFiles: number;
+  skippedFiles: number;
   createdAt: string;
   error: string | null;
 }
+
+export type ConflictPolicy = 'skip' | 'skip_if_same_size' | 'overwrite' | 'rename';
+
+export interface TransferOptions {
+  conflictPolicy: ConflictPolicy;
+  includeExtensions: string[];
+  excludeExtensions: string[];
+  minSizeBytes?: number;
+  maxSizeBytes?: number;
+  skipEmpty: boolean;
+  nameIncludes: string[];
+  nameExcludes: string[];
+  recurse: boolean;
+}
+
+export const defaultTransferOptions: TransferOptions = {
+  conflictPolicy: 'skip',
+  includeExtensions: [],
+  excludeExtensions: [],
+  skipEmpty: false,
+  nameIncludes: [],
+  nameExcludes: [],
+  recurse: true,
+};
 
 async function json<T>(res: Response): Promise<T> {
   if (!res.ok) {
@@ -61,6 +86,7 @@ export const api = {
     sourceSelection: { nodeId: string; path: string; isFolder: boolean }[];
     destFolderId: string;
     destFolderPath?: string;
+    options?: TransferOptions;
   }) =>
     fetch(`${base}/jobs`, {
       method: 'POST',

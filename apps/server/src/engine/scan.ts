@@ -4,6 +4,8 @@ export interface ScannedFile {
   sourceNodeId: string;
   sourcePath: string;
   sizeBytes: number;
+  /** Epoch ms of last modification, when the provider reports it. */
+  modified?: number;
 }
 
 export interface SelectionEntry {
@@ -21,6 +23,7 @@ export interface SelectionEntry {
 export async function scanSelection(
   provider: CloudProvider,
   selection: SelectionEntry[],
+  recurse = true,
 ): Promise<ScannedFile[]> {
   const out: ScannedFile[] = [];
 
@@ -30,10 +33,17 @@ export async function scanSelection(
       provider.listFolders(folderId),
     ]);
     for (const f of files) {
-      out.push({ sourceNodeId: f.id, sourcePath: `${prefix}${f.name}`, sizeBytes: f.size });
+      out.push({
+        sourceNodeId: f.id,
+        sourcePath: `${prefix}${f.name}`,
+        sizeBytes: f.size,
+        modified: f.modified?.getTime(),
+      });
     }
-    for (const d of folders) {
-      await walkFolder(d.id, `${prefix}${d.name}/`);
+    if (recurse) {
+      for (const d of folders) {
+        await walkFolder(d.id, `${prefix}${d.name}/`);
+      }
     }
   }
 
@@ -43,7 +53,7 @@ export async function scanSelection(
       await walkFolder(entry.nodeId, `${name}/`);
     } else {
       const meta = await provider.getMetadata(entry.nodeId);
-      out.push({ sourceNodeId: meta.id, sourcePath: meta.name, sizeBytes: meta.size });
+      out.push({ sourceNodeId: meta.id, sourcePath: meta.name, sizeBytes: meta.size, modified: meta.modified?.getTime() });
     }
   }
   return out;

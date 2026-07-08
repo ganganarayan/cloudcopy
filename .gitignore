@@ -21,3 +21,7 @@ build/
 # OS
 Thumbs.db
 .DS_Store
+
+# Local secrets / notes
+Google Oauth.txt
+*.secret.txt

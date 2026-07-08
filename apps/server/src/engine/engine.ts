@@ -13,7 +13,9 @@ import type { Metrics } from '../observability/metrics.js';
 import { ProviderRegistry, type AccountRow, type IProviderRegistry } from '../providers/registry.js';
 import type { ProgressBus } from '../realtime/bus.js';
 import { withRetry } from './retry.js';
-import { scanSelection, type SelectionEntry } from './scan.js';
+import { scanSelection, type ScannedFile, type SelectionEntry } from './scan.js';
+import { parseTransferOptions, type ConflictPolicy } from './options.js';
+import { basename, filterReason, uniqueName } from './filter.js';
 
 const MAX_FILE_ATTEMPTS = 5;
 const POLL_INTERVAL_MS = 2000;
@@ -147,17 +149,53 @@ export class TransferEngine {
   private async prepareJob(jobId: string): Promise<void> {
     const job = await this.getJob(jobId);
     if (!job) return;
+    const opts = parseTransferOptions(job.options);
     await this.setJobState(jobId, 'preparing');
     await this.setJobState(jobId, 'scanning');
     this.publishJobState(jobId, 'scanning');
 
     const source = await this.connectAccount(job.sourceAccountId);
-    const scanned = await scanSelection(source, job.sourceSelection as SelectionEntry[]);
+    const scanned = await scanSelection(source, job.sourceSelection as SelectionEntry[], opts.recurse);
 
     await this.setJobState(jobId, 'planning');
-    if (scanned.length > 0) {
+
+    // 1) selective-transfer filters (type / size / name / date)
+    const toTransfer: ScannedFile[] = [];
+    const skipped: { f: ScannedFile; reason: string }[] = [];
+    for (const f of scanned) {
+      const reason = filterReason(f, opts);
+      if (reason) skipped.push({ f, reason });
+      else toTransfer.push(f);
+    }
+
+    // 2) conflict policy for files already present in the destination folder
+    const survivors: ScannedFile[] = [];
+    if (opts.conflictPolicy === 'skip' || opts.conflictPolicy === 'skip_if_same_size') {
+      const dest = await this.connectAccount(job.destAccountId);
+      const existing = await dest.listFiles(job.destFolderId).catch(() => []);
+      const sizeByName = new Map(existing.map((e) => [e.name.toLowerCase(), e.size]));
+      for (const f of toTransfer) {
+        const name = basename(f.sourcePath).toLowerCase();
+        if (sizeByName.has(name)) {
+          if (opts.conflictPolicy === 'skip') {
+            skipped.push({ f, reason: 'already exists' });
+            continue;
+          }
+          if (sizeByName.get(name) === f.sizeBytes) {
+            skipped.push({ f, reason: 'already exists (same size)' });
+            continue;
+          }
+        }
+        survivors.push(f);
+      }
+    } else {
+      // overwrite / rename: resolved per-file at transfer time
+      survivors.push(...toTransfer);
+    }
+
+    if (survivors.length > 0) {
       await this.db.insert(jobFiles).values(
-        scanned.map((f) => ({
+        survivors.map((f) => ({
           jobId,
           state: 'pending' as const,
           sourceNodeId: f.sourceNodeId,
@@ -168,15 +206,42 @@ export class TransferEngine {
         })),
       );
     }
-    const totalBytes = scanned.reduce((a, f) => a + f.sizeBytes, 0);
+    if (skipped.length > 0) {
+      await this.db.insert(jobFiles).values(
+        skipped.map(({ f, reason }) => ({
+          jobId,
+          state: 'skipped' as const,
+          sourceNodeId: f.sourceNodeId,
+          sourcePath: f.sourcePath,
+          destParentId: job.destFolderId,
+          sizeBytes: f.sizeBytes,
+          error: reason,
+          finishedAt: new Date(),
+        })),
+      );
+    }
+
+    const totalBytes = survivors.reduce((a, f) => a + f.sizeBytes, 0);
     await this.db
       .update(jobs)
-      .set({ totalFiles: scanned.length, totalBytes, state: 'running', startedAt: new Date(), updatedAt: new Date() })
+      .set({
+        totalFiles: survivors.length,
+        totalBytes,
+        skippedFiles: skipped.length,
+        state: 'running',
+        startedAt: new Date(),
+        updatedAt: new Date(),
+      })
       .where(eq(jobs.id, jobId));
-    await this.events.append('JobPlanned', { jobId, files: scanned.length, totalBytes }, job.userId);
+    await this.events.append('JobPlanned', { jobId, files: survivors.length, skipped: skipped.length, totalBytes }, job.userId);
     await this.events.append('JobStarted', { jobId }, job.userId);
     this.publishJobState(jobId, 'running');
-    void this.pump();
+    if (survivors.length === 0) {
+      // Nothing to transfer (all filtered/skipped) — close the job out immediately.
+      await this.maybeFinishJob(jobId, job.userId);
+    } else {
+      void this.pump();
+    }
   }
 
   async pause(jobId: string): Promise<void> {
@@ -279,7 +344,7 @@ export class TransferEngine {
         this.connectAccount(job.destAccountId),
       ]);
 
-      const { session, committedOffset, doneFile } = await this.ensureSession(file, dest);
+      const { session, committedOffset, doneFile } = await this.ensureSession(file, dest, parseTransferOptions(job.options).conflictPolicy);
       if (doneFile) {
         await this.completeFile(file, job.userId, doneFile.id, doneFile.checksum?.value, true);
         return;
@@ -287,7 +352,6 @@ export class TransferEngine {
 
       await this.db.update(jobFiles).set({ state: 'uploading', updatedAt: new Date() }).where(eq(jobFiles.id, file.id));
 
-      const name = file.sourcePath.split('/').pop() ?? file.sourcePath;
       const md5 = committedOffset === 0 ? createHash('md5') : null; // resume ⇒ size-only verify
       let offset = committedOffset;
       let destFileId: string | undefined;
@@ -355,6 +419,7 @@ export class TransferEngine {
   private async ensureSession(
     file: ClaimedFile,
     dest: CloudProvider,
+    conflictPolicy: ConflictPolicy = 'skip',
   ): Promise<{ session: { sessionUri: string }; committedOffset: number; doneFile?: { id: string; checksum?: { value: string } } }> {
     const existing = await this.db
       .select()
@@ -379,8 +444,20 @@ export class TransferEngine {
       await this.db.update(uploadSessions).set({ state: 'expired' }).where(eq(uploadSessions.id, existing[0].id));
     }
 
-    const name = file.sourcePath.split('/').pop() ?? file.sourcePath;
-    const session = await dest.createUpload({ name, parentId: file.destParentId ?? 'root', size: file.sizeBytes });
+    let name = basename(file.sourcePath);
+    const parentId = file.destParentId ?? 'root';
+    // Resolve the destination name per the conflict policy at upload time.
+    if (conflictPolicy === 'overwrite' || conflictPolicy === 'rename') {
+      const existing = await dest.listFiles(parentId).catch(() => []);
+      if (conflictPolicy === 'overwrite') {
+        for (const e of existing) {
+          if (e.name.toLowerCase() === name.toLowerCase()) await dest.delete(e.id).catch(() => {});
+        }
+      } else {
+        name = uniqueName(name, new Set(existing.map((e) => e.name.toLowerCase())));
+      }
+    }
+    const session = await dest.createUpload({ name, parentId, size: file.sizeBytes });
     await this.db.insert(uploadSessions).values({
       jobFileId: file.id,
       providerId: dest.id,

@@ -3,6 +3,7 @@ import { desc, eq } from 'drizzle-orm';
 import { z } from 'zod';
 import type { AppContext } from '../server.js';
 import { jobFiles, jobs } from '../../db/schema.js';
+import { transferOptionsSchema } from '../../engine/options.js';
 
 const selectionEntry = z.object({
   nodeId: z.string(),
@@ -18,6 +19,7 @@ const createJobBody = z.object({
   destFolderId: z.string().min(1),
   destFolderPath: z.string().optional(),
   mode: z.enum(['copy', 'mirror', 'incremental', 'update_only']).optional(),
+  options: transferOptionsSchema.optional(),
 });
 
 export function registerJobRoutes(app: FastifyInstance, ctx: AppContext): void {
@@ -86,6 +88,7 @@ function jobSummary(j: typeof jobs.$inferSelect) {
     transferredBytes: j.transferredBytes,
     completedFiles: j.completedFiles,
     failedFiles: j.failedFiles,
+    skippedFiles: j.skippedFiles,
     createdAt: j.createdAt,
     startedAt: j.startedAt,
     finishedAt: j.finishedAt,

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
-import { api, connectWs, formatBytes, type Account, type Job } from './api.js';
+import { api, connectWs, defaultTransferOptions, formatBytes, type Account, type Job, type TransferOptions } from './api.js';
 import { FolderPane, type Selected } from './FolderPane.js';
+import { TransferOptionsPanel } from './TransferOptions.js';
 
 const ACTIVE = new Set(['queued', 'preparing', 'scanning', 'planning', 'running', 'retrying', 'paused']);
 
@@ -15,6 +16,7 @@ export function App() {
   const [destId, setDestId] = useState<string>('');
   const [selected, setSelected] = useState<Map<string, Selected>>(new Map());
   const [destFolder, setDestFolder] = useState<{ id: string; path: string }>({ id: 'root', path: '' });
+  const [options, setOptions] = useState<TransferOptions>(defaultTransferOptions);
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
 
@@ -82,6 +84,7 @@ export function App() {
         sourceSelection: [...selected.values()],
         destFolderId: destFolder.id,
         destFolderPath: destFolder.path,
+        options,
       });
       setSelected(new Map());
       setToast('Transfer started');
@@ -191,6 +194,10 @@ export function App() {
                 )}
               </div>
             </div>
+          </div>
+
+          <div className="mt-4">
+            <TransferOptionsPanel value={options} onChange={setOptions} />
           </div>
 
           <div className="mt-4 flex items-center justify-between">
@@ -357,7 +364,9 @@ function Jobs({ jobs, onAction }: { jobs: Job[]; onAction: (id: string, a: 'paus
               </div>
               <div className="flex justify-between text-xs text-slate-400 mt-1">
                 <span>
-                  {j.completedFiles}/{j.totalFiles} files{j.failedFiles > 0 && <span className="text-red-400"> · {j.failedFiles} failed</span>}
+                  {j.completedFiles}/{j.totalFiles} files
+                  {j.failedFiles > 0 && <span className="text-red-400"> · {j.failedFiles} failed</span>}
+                  {j.skippedFiles > 0 && <span className="text-amber-400"> · {j.skippedFiles} skipped</span>}
                 </span>
                 <span>
                   {formatBytes(j.transferredBytes)} / {formatBytes(j.totalBytes)} ({pct}%)
